@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CS.RIN.RU Enhanced — Steam Bridge
 // @namespace    https://cs.rin.ru/
-// @version      1.0.9
+// @version      1.1.0
 // @description  Adds a button on Steam store pages to find or start a CS.RIN.RU forum thread for the game, and autofills the new-post Subject and SteamInfo BBCode.
 // @author       oragon
 // @homepageURL  https://github.com/Oragonn/cs-rin-ru-steam-bridge
@@ -161,24 +161,37 @@
 
   // ---------- CS.RIN.RU search results page ----------
 
-  function initSearchResultsPage() {
+  // Results come 100 per page; a common word can bury the real thread a few
+  // pages deep. Paging a cached search isn't subject to the search flood limit.
+  const MAX_RESULT_PAGES = 5;
+
+  async function initSearchResultsPage() {
     try {
       const pending = getPendingGame();
       if (!pending) return; // Manual/unrelated visit to search.php; leave the page alone.
 
-      // Search results (in "topics" mode) render as a.topictitle rows inside #wrapcentre.
-      const container = document.querySelector('#wrapcentre') || document;
-      const results = container.querySelectorAll('a.topictitle');
+      // The forum's search flood limit renders an empty result page. Keep the
+      // pending game so a reload (once the limit passes) picks up where we left off.
+      if (isSearchFloodLimited(document)) {
+        warn('Search is flood-limited right now; reload the page in a moment.');
+        return;
+      }
 
-      if (results.length > 0) {
-        const href = results[0].getAttribute('href');
+      // The search matches any topic whose title merely contains the words, so
+      // the first result is often unrelated (e.g. the game "CRACK" matched
+      // "[Release] WeMod Crack"). Only follow a result whose title is the game.
+      const { href, resultCount } = await findMatchingTopic(pending.gameName);
+      if (href) {
         clearPendingGame();
-        location.href = new URL(href, location.href).toString();
+        location.href = href;
         return;
       }
 
       const proceed = window.confirm(
-        'No thread found for "' + pending.gameName + '". Create a new request post?'
+        (resultCount > 0
+          ? 'None of the search results is a thread for "' + pending.gameName + '".'
+          : 'No thread found for "' + pending.gameName + '".') +
+        ' Create a new request post?'
       );
       if (proceed) {
         location.href = 'https://cs.rin.ru/forum/posting.php?mode=post&f=10';
@@ -188,6 +201,80 @@
     } catch (e) {
       warn('Failed to process search results page.', e);
     }
+  }
+
+  function isSearchFloodLimited(doc) {
+    return /cannot use search at this time/i.test(doc.body ? doc.body.textContent : '');
+  }
+
+  // Scans up to MAX_RESULT_PAGES of results for a topic titled exactly as the
+  // game. Looser "<name> - <suffix>" matching was tried and rejected: for
+  // "CRACK" it picked "[Request] Crack - Cactus League Basketball".
+  async function findMatchingTopic(gameName) {
+    const target = normalizeTitle(gameName);
+    let doc = document;
+    let pageUrl = location.href;
+    let resultCount = 0;
+
+    for (let page = 0; page < MAX_RESULT_PAGES; page++) {
+      // Search results (in "topics" mode) render as a.topictitle rows inside #wrapcentre.
+      const container = doc.querySelector('#wrapcentre') || doc;
+      const links = container.querySelectorAll('a.topictitle');
+      resultCount += links.length;
+
+      for (const link of links) {
+        if (target && normalizeTitle(link.textContent) === target) {
+          return { href: new URL(link.getAttribute('href'), pageUrl).toString(), resultCount: resultCount };
+        }
+      }
+
+      const next = Array.from(doc.querySelectorAll('a')).find(function (a) {
+        return a.textContent.trim() === 'Next';
+      });
+      if (!next || page === MAX_RESULT_PAGES - 1) break;
+      pageUrl = new URL(next.getAttribute('href'), pageUrl).toString();
+      try {
+        const res = await fetch(pageUrl, { credentials: 'same-origin' });
+        doc = new DOMParser().parseFromString(await res.text(), 'text/html');
+      } catch (e) {
+        warn('Failed to fetch the next page of search results.', e);
+        break;
+      }
+      if (isSearchFloodLimited(doc)) break;
+    }
+
+    return { href: null, resultCount: resultCount };
+  }
+
+  // Thread titles look like "[Info] Elden Ring" or
+  // "[Info] Need for Speed (2015) (Online Only-NO Crack)": drop the leading
+  // [Tag] prefixes and trailing (...) / [...] annotations.
+  function stripTitleTags(title) {
+    let t = title.trim();
+    let prev;
+    do {
+      prev = t;
+      t = t.replace(/^\[[^\]]*\]\s*/, '').replace(/\s*(\([^()]*\)|\[[^\[\]]*\])$/, '').trim();
+    } while (t !== prev);
+    return t;
+  }
+
+  // Lowercased, accents/trademark symbols removed, "&" read as "and".
+  function looseTitle(title) {
+    return title
+      .replace(/[\u2122\u00ae\u00a9]/g, '') // before NFKD, which turns the TM sign into "TM"
+      .normalize('NFKD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/&/g, ' and ')
+      .toLowerCase()
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  // Letters and digits only, so "Tom Clancy’s The Division® 2" (Steam) equals
+  // "Tom Clancy's The Division 2" (forum).
+  function normalizeTitle(title) {
+    return looseTitle(stripTitleTags(title)).replace(/[^\p{L}\p{N}]+/gu, '');
   }
 
   // ---------- CS.RIN.RU posting page ----------
