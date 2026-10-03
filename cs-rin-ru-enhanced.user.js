@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CS.RIN.RU Enhanced — Steam Bridge
 // @namespace    https://cs.rin.ru/
-// @version      1.3.0
+// @version      1.3.1
 // @description  Adds a button on Steam store pages to find or start a CS.RIN.RU forum thread for the game, and autofills the new-post Subject and SteamInfo BBCode.
 // @author       oragon
 // @homepageURL  https://github.com/Oragonn/cs-rin-ru-steam-bridge
@@ -85,17 +85,6 @@
   // redirect; the script re-initializes on the real page that follows.
   function isSecurityCheckInterstitial() {
     return /security check/i.test(document.title);
-  }
-
-  const host = location.hostname;
-  if (host === 'store.steampowered.com') {
-    initSteamPage();
-  } else if (host === 'cs.rin.ru' && !isSecurityCheckInterstitial()) {
-    if (/\/forum\/search\.php/.test(location.pathname)) {
-      initSearchResultsPage();
-    } else if (/\/forum\/posting\.php/.test(location.pathname)) {
-      initPostingPage();
-    }
   }
 
   // ---------- Steam store page ----------
@@ -510,6 +499,22 @@
       warn('Failed to inject SteamInfo generation script.', e);
     } finally {
       script.remove();
+    }
+  }
+
+  // ---------- Entry point ----------
+
+  // Kept at the very end: the page handlers read top-level consts such as
+  // MAX_RESULT_PAGES, and calling them before those lines have run throws
+  // "Cannot access ... before initialization".
+  const host = location.hostname;
+  if (host === 'store.steampowered.com') {
+    initSteamPage();
+  } else if (host === 'cs.rin.ru' && !isSecurityCheckInterstitial()) {
+    if (/\/forum\/search\.php/.test(location.pathname)) {
+      initSearchResultsPage();
+    } else if (/\/forum\/posting\.php/.test(location.pathname)) {
+      initPostingPage();
     }
   }
 })();
