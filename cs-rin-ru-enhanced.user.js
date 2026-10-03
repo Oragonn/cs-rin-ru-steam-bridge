@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CS.RIN.RU Enhanced — Steam Bridge
 // @namespace    https://cs.rin.ru/
-// @version      1.2.1
+// @version      1.3.0
 // @description  Adds a button on Steam store pages to find or start a CS.RIN.RU forum thread for the game, and autofills the new-post Subject and SteamInfo BBCode.
 // @author       oragon
 // @homepageURL  https://github.com/Oragonn/cs-rin-ru-steam-bridge
@@ -56,6 +56,27 @@
     }
   }
 
+  // The game also travels in the URL fragment (never sent to the forum). The
+  // GM_setValue write made on mousedown on Steam can still be in flight when
+  // the forum page reads it, leaving the search page with nothing to act on;
+  // the fragment is always there. It also keeps several games opened in
+  // parallel tabs apart. Stored data stays as a fallback for redirects that
+  // drop the fragment (login, the security-check interstitial).
+  function withGameHash(url, game) {
+    return url + '#' + new URLSearchParams({ csrinAppId: game.appid, csrinName: game.gameName }).toString();
+  }
+
+  function getGameFromHash() {
+    const params = new URLSearchParams(location.hash.slice(1));
+    const appid = params.get('csrinAppId');
+    const gameName = params.get('csrinName');
+    return appid && gameName ? { appid: appid, gameName: gameName } : null;
+  }
+
+  function getGame() {
+    return getGameFromHash() || getPendingGame();
+  }
+
   // On the first request of a session (roughly once a day), cs.rin.ru serves a
   // one-time JS/cookie "Security check, please wait..." interstitial at the
   // SAME URL before it sets a cookie and redirects to the real page. It's an
@@ -106,7 +127,7 @@
       button.className = 'btnv6_blue_hoverfade btn_medium';
       // A real href lets the browser handle middle-click / ctrl-click (new tab)
       // natively; the pending game is stored before any of those navigations.
-      button.href = buildAppIdSearchUrl(appid);
+      button.href = withGameHash(buildAppIdSearchUrl(appid), { appid: appid, gameName: gameName });
       button.style.marginLeft = '4px';
       const tooltipSpan = document.createElement('span');
       tooltipSpan.setAttribute('data-tooltip-text', 'Search CS.RIN.RU for this game');
@@ -191,15 +212,17 @@
 
   async function initSearchResultsPage() {
     try {
-      const pending = getPendingGame();
+      const pending = getGame();
       if (!pending) return; // Manual/unrelated visit to search.php; leave the page alone.
+      console.info(LOG_PREFIX + ' Looking for a thread for "' + pending.gameName + '" (AppID ' + pending.appid + ').');
 
       // The forum's search flood limit renders an empty result page; wait and
       // reload instead of reading it as "no results".
       if (isSearchFloodLimited(document)) {
-        retryAfterFloodLimit(pending);
+        retryAfterFloodLimit();
         return;
       }
+      setFloodRetries(0);
 
       const results = await collectSearchResults();
       const target = normalizeTitle(pending.gameName);
@@ -219,7 +242,7 @@
           location.href = href;
         } else {
           // Step 2: older threads may lack the SteamInfo block; search titles.
-          location.href = buildSearchUrl(pending.gameName);
+          location.href = withGameHash(buildSearchUrl(pending.gameName), pending);
         }
         return;
       }
@@ -244,7 +267,7 @@
         [
           { label: 'Create request post', onClick: function () {
             setPendingGame({ appid: pending.appid, gameName: pending.gameName, ts: Date.now() });
-            location.href = 'https://cs.rin.ru/forum/posting.php?mode=post&f=10';
+            location.href = withGameHash('https://cs.rin.ru/forum/posting.php?mode=post&f=10', pending);
           } },
           { label: 'Dismiss', onClick: function () { notice.remove(); } }
         ]
@@ -258,16 +281,32 @@
     return /cannot use search at this time/i.test(doc.body ? doc.body.textContent : '');
   }
 
-  function retryAfterFloodLimit(pending) {
-    const retries = (pending.floodRetries || 0) + 1;
+  // Per-tab retry count; sessionStorage survives the reload.
+  function getFloodRetries() {
+    try {
+      return Number(sessionStorage.getItem('csrinFloodRetries')) || 0;
+    } catch (e) {
+      return 0;
+    }
+  }
+
+  function setFloodRetries(n) {
+    try {
+      if (n) sessionStorage.setItem('csrinFloodRetries', String(n));
+      else sessionStorage.removeItem('csrinFloodRetries');
+    } catch (e) {
+      warn('Failed to store the search retry count.', e);
+    }
+  }
+
+  function retryAfterFloodLimit() {
+    const retries = getFloodRetries() + 1;
     if (retries > MAX_FLOOD_RETRIES) {
-      pending.floodRetries = 0; // a manual reload gets a fresh set of retries
-      setPendingGame(pending);
+      setFloodRetries(0); // a manual reload gets a fresh set of retries
       showNotice('Search is still on cooldown. Reload the page in a minute to try again.', []);
       return;
     }
-    pending.floodRetries = retries;
-    setPendingGame(pending);
+    setFloodRetries(retries);
 
     showNotice('Search cooldown, retrying in ' + (FLOOD_RETRY_DELAY_MS / 1000) + 's (' +
       retries + '/' + MAX_FLOOD_RETRIES + ')...', []);
@@ -384,7 +423,7 @@
 
   function initPostingPage() {
     try {
-      const pending = getPendingGame();
+      const pending = getGame();
       if (!pending) return; // No stored game data; don't touch unrelated/manual posts.
 
       const subjectField = document.querySelector('#subject, input[name="subject"]');
