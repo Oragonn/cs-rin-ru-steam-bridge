@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CS.RIN.RU Enhanced — Steam Bridge
 // @namespace    https://cs.rin.ru/
-// @version      1.1.0
+// @version      1.2.0
 // @description  Adds a button on Steam store pages to find or start a CS.RIN.RU forum thread for the game, and autofills the new-post Subject and SteamInfo BBCode.
 // @author       oragon
 // @homepageURL  https://github.com/Oragonn/cs-rin-ru-steam-bridge
@@ -106,7 +106,7 @@
       button.className = 'btnv6_blue_hoverfade btn_medium';
       // A real href lets the browser handle middle-click / ctrl-click (new tab)
       // natively; the pending game is stored before any of those navigations.
-      button.href = buildSearchUrl(gameName);
+      button.href = buildAppIdSearchUrl(appid);
       button.style.marginLeft = '4px';
       const tooltipSpan = document.createElement('span');
       tooltipSpan.setAttribute('data-tooltip-text', 'Search CS.RIN.RU for this game');
@@ -159,36 +159,79 @@
     return 'https://cs.rin.ru/forum/search.php?' + params.toString();
   }
 
+  // Game threads open with the SteamInfo block, whose Steam image URLs
+  // (".../steam/apps/<appid>/header.jpg") put the AppID in the first post's
+  // search index. This finds threads whose title differs from the Steam name
+  // (Steam "Baldur's Gate 3" vs forum "Baldur's Gate III").
+  function buildAppIdSearchUrl(appid) {
+    const params = new URLSearchParams({
+      keywords: String(appid),
+      terms: 'all',
+      sf: 'firstpost',
+      sr: 'topics',
+      sk: 't',
+      sd: 'd',
+      submit: 'Search'
+    });
+    return 'https://cs.rin.ru/forum/search.php?' + params.toString();
+  }
+
   // ---------- CS.RIN.RU search results page ----------
 
   // Results come 100 per page; a common word can bury the real thread a few
   // pages deep. Paging a cached search isn't subject to the search flood limit.
   const MAX_RESULT_PAGES = 5;
+  // A short AppID like 620 also matches unrelated first posts (file sizes,
+  // other numbers), so AppID hits without a matching title are confirmed by
+  // opening the topic. Caps how many topics that fetches.
+  const MAX_APPID_VERIFY = 5;
+  // Anonymous searches are rate-limited to roughly one per 5-10 seconds.
+  const FLOOD_RETRY_DELAY_MS = 10000;
+  const MAX_FLOOD_RETRIES = 5;
 
   async function initSearchResultsPage() {
     try {
       const pending = getPendingGame();
       if (!pending) return; // Manual/unrelated visit to search.php; leave the page alone.
 
-      // The forum's search flood limit renders an empty result page. Keep the
-      // pending game so a reload (once the limit passes) picks up where we left off.
+      // The forum's search flood limit renders an empty result page; wait and
+      // reload instead of reading it as "no results".
       if (isSearchFloodLimited(document)) {
-        warn('Search is flood-limited right now; reload the page in a moment.');
+        retryAfterFloodLimit(pending);
         return;
       }
 
+      const results = await collectSearchResults();
+      const target = normalizeTitle(pending.gameName);
       // The search matches any topic whose title merely contains the words, so
       // the first result is often unrelated (e.g. the game "CRACK" matched
       // "[Release] WeMod Crack"). Only follow a result whose title is the game.
-      const { href, resultCount } = await findMatchingTopic(pending.gameName);
-      if (href) {
+      const titled = results.find(function (r) {
+        return target && normalizeTitle(r.title) === target;
+      });
+
+      const keywords = new URLSearchParams(location.search).get('keywords');
+      if (keywords === String(pending.appid)) {
+        // Step 1 of 2: first posts mentioning the AppID.
+        const href = titled ? titled.href : await findTopicMentioningAppId(results, pending.appid);
+        if (href) {
+          clearPendingGame();
+          location.href = href;
+        } else {
+          // Step 2: older threads may lack the SteamInfo block; search titles.
+          location.href = buildSearchUrl(pending.gameName);
+        }
+        return;
+      }
+
+      if (titled) {
         clearPendingGame();
-        location.href = href;
+        location.href = titled.href;
         return;
       }
 
       const proceed = window.confirm(
-        (resultCount > 0
+        (results.length > 0
           ? 'None of the search results is a thread for "' + pending.gameName + '".'
           : 'No thread found for "' + pending.gameName + '".') +
         ' Create a new request post?'
@@ -207,25 +250,58 @@
     return /cannot use search at this time/i.test(doc.body ? doc.body.textContent : '');
   }
 
-  // Scans up to MAX_RESULT_PAGES of results for a topic titled exactly as the
-  // game. Looser "<name> - <suffix>" matching was tried and rejected: for
-  // "CRACK" it picked "[Request] Crack - Cactus League Basketball".
-  async function findMatchingTopic(gameName) {
-    const target = normalizeTitle(gameName);
+  function retryAfterFloodLimit(pending) {
+    const retries = (pending.floodRetries || 0) + 1;
+    if (retries > MAX_FLOOD_RETRIES) {
+      warn('Search is still flood-limited; giving up. Reload the page to try again.');
+      return;
+    }
+    pending.floodRetries = retries;
+    setPendingGame(pending);
+
+    const notice = document.createElement('div');
+    notice.textContent = 'CS.RIN.RU Enhanced: search cooldown, retrying in ' +
+      (FLOOD_RETRY_DELAY_MS / 1000) + 's (' + retries + '/' + MAX_FLOOD_RETRIES + ')...';
+    notice.style.cssText = 'position:fixed;top:8px;right:8px;z-index:9999;padding:6px 10px;' +
+      'background:#333;color:#fff;border:1px solid #888;font:12px sans-serif;';
+    document.body.appendChild(notice);
+    setTimeout(function () { location.reload(); }, FLOOD_RETRY_DELAY_MS);
+  }
+
+  // Confirms that a topic's first post links this AppID (SteamInfo image URLs
+  // ".../steam/apps/<appid>/..." or store/SteamDB ".../app/<appid>").
+  async function findTopicMentioningAppId(results, appid) {
+    const idPattern = new RegExp('/apps?/' + appid + '(?![0-9])');
+    for (const r of results.slice(0, MAX_APPID_VERIFY)) {
+      try {
+        const res = await fetch(r.href, { credentials: 'same-origin' });
+        const doc = new DOMParser().parseFromString(await res.text(), 'text/html');
+        const firstPost = doc.querySelector('.postbody');
+        if (firstPost && idPattern.test(firstPost.innerHTML)) return r.href;
+      } catch (e) {
+        warn('Failed to fetch a topic to check its AppID.', e);
+      }
+    }
+    return null;
+  }
+
+  // Collects { title, href } for up to MAX_RESULT_PAGES of results. Titles are
+  // matched exactly (see normalizeTitle); looser "<name> - <suffix>" matching
+  // was tried and rejected: for "CRACK" it picked
+  // "[Request] Crack - Cactus League Basketball".
+  async function collectSearchResults() {
+    const results = [];
     let doc = document;
     let pageUrl = location.href;
-    let resultCount = 0;
 
     for (let page = 0; page < MAX_RESULT_PAGES; page++) {
       // Search results (in "topics" mode) render as a.topictitle rows inside #wrapcentre.
       const container = doc.querySelector('#wrapcentre') || doc;
-      const links = container.querySelectorAll('a.topictitle');
-      resultCount += links.length;
-
-      for (const link of links) {
-        if (target && normalizeTitle(link.textContent) === target) {
-          return { href: new URL(link.getAttribute('href'), pageUrl).toString(), resultCount: resultCount };
-        }
+      for (const link of container.querySelectorAll('a.topictitle')) {
+        results.push({
+          title: link.textContent,
+          href: new URL(link.getAttribute('href'), pageUrl).toString()
+        });
       }
 
       const next = Array.from(doc.querySelectorAll('a')).find(function (a) {
@@ -243,7 +319,7 @@
       if (isSearchFloodLimited(doc)) break;
     }
 
-    return { href: null, resultCount: resultCount };
+    return results;
   }
 
   // Thread titles look like "[Info] Elden Ring" or

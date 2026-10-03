@@ -1,6 +1,6 @@
 # CS.RIN.RU Enhanced — Steam Bridge
 
-Tampermonkey userscript that adds a CS.RIN.RU button to Steam store app pages. It searches the forum for the game's thread and opens it, or offers to start a new request post with the Subject and SteamInfo BBCode autofilled.
+Tampermonkey userscript that adds a CS.RIN.RU button to Steam store app pages. It searches the forum for the game's thread (first by Steam AppID, then by exact title) and opens it, or offers to start a new request post with the Subject and SteamInfo BBCode autofilled.
 
 ## Install
 
