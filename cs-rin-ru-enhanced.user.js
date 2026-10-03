@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CS.RIN.RU Enhanced — Steam Bridge
 // @namespace    https://cs.rin.ru/
-// @version      1.3.1
+// @version      1.4.0
 // @description  Adds a button on Steam store pages to find or start a CS.RIN.RU forum thread for the game, and autofills the new-post Subject and SteamInfo BBCode.
 // @author       oragon
 // @homepageURL  https://github.com/Oragonn/cs-rin-ru-steam-bridge
@@ -223,40 +223,36 @@
       });
 
       const keywords = new URLSearchParams(location.search).get('keywords');
-      if (keywords === String(pending.appid)) {
-        // Step 1 of 2: first posts mentioning the AppID.
-        const href = titled ? titled.href : await findTopicMentioningAppId(results, pending.appid);
-        if (href) {
-          clearPendingGame();
-          location.href = href;
-        } else {
-          // Step 2: older threads may lack the SteamInfo block; search titles.
-          location.href = withGameHash(buildSearchUrl(pending.gameName), pending);
-        }
-        return;
-      }
-
-      if (titled) {
+      const byAppId = keywords === String(pending.appid);
+      const href = titled ? titled.href
+        : byAppId ? await findTopicMentioningAppId(results, pending.appid)
+        : null;
+      if (href) {
         clearPendingGame();
-        location.href = titled.href;
+        location.href = href;
         return;
       }
 
-      // An on-page notice rather than window.confirm(): Chromium browsers
-      // silently answer "Cancel" for dialogs in background tabs (e.g. the
-      // Steam button middle-clicked) or after "prevent additional dialogs".
+      // No automatic second search: the user picks the other search (older
+      // threads may lack the SteamInfo block the AppID search relies on) or a
+      // request post. An on-page notice rather than window.confirm(): Chromium
+      // browsers silently answer "Cancel" for dialogs in background tabs (e.g.
+      // the Steam button middle-clicked) or after "prevent additional dialogs".
       // Pending is cleared now so a later manual search doesn't re-trigger
-      // this; the button restores it for the posting-page autofill.
+      // this; the buttons restore it before navigating.
       clearPendingGame();
+      const goTo = function (url) {
+        setPendingGame({ appid: pending.appid, gameName: pending.gameName, ts: Date.now() });
+        location.href = withGameHash(url, pending);
+      };
       const notice = showNotice(
-        (results.length > 0
-          ? 'None of the search results is a thread for "' + pending.gameName + '".'
-          : 'No thread found for "' + pending.gameName + '".') +
-        ' Create a new request post?',
+        'No thread found for "' + pending.gameName + '" by ' + (byAppId ? 'AppID ' + pending.appid : 'title') + '.',
         [
+          byAppId
+            ? { label: 'Search by name', onClick: function () { goTo(buildSearchUrl(pending.gameName)); } }
+            : { label: 'Search by AppID', onClick: function () { goTo(buildAppIdSearchUrl(pending.appid)); } },
           { label: 'Create request post', onClick: function () {
-            setPendingGame({ appid: pending.appid, gameName: pending.gameName, ts: Date.now() });
-            location.href = withGameHash('https://cs.rin.ru/forum/posting.php?mode=post&f=10', pending);
+            goTo('https://cs.rin.ru/forum/posting.php?mode=post&f=10');
           } },
           { label: 'Dismiss', onClick: function () { notice.remove(); } }
         ]
