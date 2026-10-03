@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CS.RIN.RU Enhanced — Steam Bridge
 // @namespace    https://cs.rin.ru/
-// @version      1.2.0
+// @version      1.2.1
 // @description  Adds a button on Steam store pages to find or start a CS.RIN.RU forum thread for the game, and autofills the new-post Subject and SteamInfo BBCode.
 // @author       oragon
 // @homepageURL  https://github.com/Oragonn/cs-rin-ru-steam-bridge
@@ -230,17 +230,25 @@
         return;
       }
 
-      const proceed = window.confirm(
+      // An on-page notice rather than window.confirm(): Chromium browsers
+      // silently answer "Cancel" for dialogs in background tabs (e.g. the
+      // Steam button middle-clicked) or after "prevent additional dialogs".
+      // Pending is cleared now so a later manual search doesn't re-trigger
+      // this; the button restores it for the posting-page autofill.
+      clearPendingGame();
+      const notice = showNotice(
         (results.length > 0
           ? 'None of the search results is a thread for "' + pending.gameName + '".'
           : 'No thread found for "' + pending.gameName + '".') +
-        ' Create a new request post?'
+        ' Create a new request post?',
+        [
+          { label: 'Create request post', onClick: function () {
+            setPendingGame({ appid: pending.appid, gameName: pending.gameName, ts: Date.now() });
+            location.href = 'https://cs.rin.ru/forum/posting.php?mode=post&f=10';
+          } },
+          { label: 'Dismiss', onClick: function () { notice.remove(); } }
+        ]
       );
-      if (proceed) {
-        location.href = 'https://cs.rin.ru/forum/posting.php?mode=post&f=10';
-      } else {
-        clearPendingGame();
-      }
     } catch (e) {
       warn('Failed to process search results page.', e);
     }
@@ -253,19 +261,38 @@
   function retryAfterFloodLimit(pending) {
     const retries = (pending.floodRetries || 0) + 1;
     if (retries > MAX_FLOOD_RETRIES) {
-      warn('Search is still flood-limited; giving up. Reload the page to try again.');
+      pending.floodRetries = 0; // a manual reload gets a fresh set of retries
+      setPendingGame(pending);
+      showNotice('Search is still on cooldown. Reload the page in a minute to try again.', []);
       return;
     }
     pending.floodRetries = retries;
     setPendingGame(pending);
 
-    const notice = document.createElement('div');
-    notice.textContent = 'CS.RIN.RU Enhanced: search cooldown, retrying in ' +
-      (FLOOD_RETRY_DELAY_MS / 1000) + 's (' + retries + '/' + MAX_FLOOD_RETRIES + ')...';
-    notice.style.cssText = 'position:fixed;top:8px;right:8px;z-index:9999;padding:6px 10px;' +
-      'background:#333;color:#fff;border:1px solid #888;font:12px sans-serif;';
-    document.body.appendChild(notice);
+    showNotice('Search cooldown, retrying in ' + (FLOOD_RETRY_DELAY_MS / 1000) + 's (' +
+      retries + '/' + MAX_FLOOD_RETRIES + ')...', []);
     setTimeout(function () { location.reload(); }, FLOOD_RETRY_DELAY_MS);
+  }
+
+  // Fixed box in the top-right corner; buttons are { label, onClick }.
+  function showNotice(text, buttons) {
+    const notice = document.createElement('div');
+    notice.style.cssText = 'position:fixed;top:8px;right:8px;z-index:9999;max-width:360px;' +
+      'padding:8px 10px;background:#333;color:#fff;border:1px solid #888;font:12px sans-serif;';
+    const message = document.createElement('div');
+    message.textContent = 'CS.RIN.RU Enhanced: ' + text;
+    notice.appendChild(message);
+    buttons.forEach(function (b) {
+      const btn = document.createElement('input');
+      btn.type = 'button';
+      btn.value = b.label;
+      btn.style.marginTop = '6px';
+      btn.style.marginRight = '6px';
+      btn.addEventListener('click', b.onClick);
+      notice.appendChild(btn);
+    });
+    document.body.appendChild(notice);
+    return notice;
   }
 
   // Confirms that a topic's first post links this AppID (SteamInfo image URLs
